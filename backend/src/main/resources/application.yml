@@ -1,0 +1,43 @@
+server:
+  port: 8080
+  servlet:
+    context-path: /
+
+spring:
+  application:
+    name: shiftsync-backend
+
+  # Database configuration (H2 for frictionless local development)
+  datasource:
+    url: jdbc:h2:mem:shiftsyncdb;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    driverClassName: org.h2.Driver
+    username: sa
+    password: 
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+
+  # JPA & Hibernate Settings
+  jpa:
+    database-platform: org.hibernate.dialect.H2Dialect
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: true
+
+# Timefold AI Solver Configuration
+timefold:
+  solver:
+    termination:
+      # Max time solver is allowed to optimize (30 seconds default for high-quality schedules)
+      spent-limit: 30s
+    environment-mode: REPRODUCIBLE
+
+# CORS settings for frontend communication
+app:
+  cors:
+    allowed-origins: "http://localhost:5173,http://localhost:3000"
