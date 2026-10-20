@@ -1,5 +1,6 @@
 package com.shiftsync.domain.entity;
 
+import ai.timefold.solver.core.api.domain.lookup.PlanningId;
 import com.shiftsync.domain.enums.Skill;
 import jakarta.persistence.*;
 import jakarta.validation.constraints.Email;
@@ -23,6 +24,7 @@ public class Employee {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @PlanningId
     private Long id;
 
     @NotBlank

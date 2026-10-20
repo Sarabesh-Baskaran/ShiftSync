@@ -1,5 +1,8 @@
 package com.shiftsync.domain.entity;
 
+import ai.timefold.solver.core.api.domain.entity.PlanningEntity;
+import ai.timefold.solver.core.api.domain.lookup.PlanningId;
+import ai.timefold.solver.core.api.domain.variable.PlanningVariable;
 import com.shiftsync.domain.enums.ShiftStatus;
 import com.shiftsync.domain.enums.ShiftType;
 import com.shiftsync.domain.enums.Skill;
@@ -12,9 +15,12 @@ import java.time.LocalDateTime;
 
 /**
  * Hospital shift requirement or assignment.
+ * Marked as a Timefold @PlanningEntity: its assignedEmployee is the @PlanningVariable
+ * modified by the optimization algorithms during roster scheduling.
  */
 @Entity
 @Table(name = "shifts")
+@PlanningEntity
 @Getter
 @Setter
 @NoArgsConstructor
@@ -24,6 +30,7 @@ public class Shift {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @PlanningId
     private Long id;
 
     @NotNull
@@ -42,7 +49,10 @@ public class Shift {
 
     /**
      * Healthcare worker assigned to this shift. Null when the shift slot is unassigned.
+     * Annotated with @PlanningVariable to indicate that Timefold explores different employee
+     * assignments from the 'employeeRange' provider to optimize the score.
      */
+    @PlanningVariable(valueRangeProviderRefs = "employeeRange", nullable = true)
     @ManyToOne(fetch = FetchType.EAGER)
     @JoinColumn(name = "employee_id")
     private Employee assignedEmployee;
