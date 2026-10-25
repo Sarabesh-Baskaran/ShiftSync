@@ -202,4 +202,102 @@ class RosterConstraintProviderTest {
                 .given(unassignedSlot)
                 .penalizesBy(1);
     }
+
+    @Test
+    @DisplayName("Should penalize 3 or more consecutive high-stress shifts (ICU)")
+    void testExceededConsecutiveHighStressShifts() {
+        Department icu = Department.builder().id(1L).name("ICU").type(DepartmentType.ICU).build();
+
+        Employee nurse = Employee.builder()
+                .id(106L)
+                .employeeCode("RN-STRESS")
+                .fullName("ICU Nurse")
+                .skills(Set.of(Skill.REGISTERED_NURSE, Skill.ICU_CERTIFIED))
+                .build();
+
+        // 3 consecutive ICU shifts on Day 1, Day 2, Day 3
+        Shift day1 = Shift.builder().id(1L).shiftDate(LocalDate.of(2026, 10, 20)).shiftType(ShiftType.MORNING).department(icu).assignedEmployee(nurse).build();
+        Shift day2 = Shift.builder().id(2L).shiftDate(LocalDate.of(2026, 10, 21)).shiftType(ShiftType.MORNING).department(icu).assignedEmployee(nurse).build();
+        Shift day3 = Shift.builder().id(3L).shiftDate(LocalDate.of(2026, 10, 22)).shiftType(ShiftType.MORNING).department(icu).assignedEmployee(nurse).build();
+
+        // 3 consecutive days triggers the medium penalty
+        constraintVerifier.verifyThat(RosterConstraintProvider::exceededConsecutiveHighStressShifts)
+                .given(day1, day2, day3)
+                .penalizesBy(1);
+
+        // 2 consecutive days (safe limit) incurs zero penalty
+        constraintVerifier.verifyThat(RosterConstraintProvider::exceededConsecutiveHighStressShifts)
+                .given(day1, day2)
+                .penalizesBy(0);
+    }
+
+    @Test
+    @DisplayName("Should apply quadratic penalty to night shifts to encourage fair distribution")
+    void testFairNightShiftDistribution() {
+        Department general = Department.builder().id(1L).name("General").type(DepartmentType.GENERAL_WARD).build();
+
+        Employee nurse = Employee.builder()
+                .id(107L)
+                .employeeCode("RN-NIGHT")
+                .fullName("Night Nurse")
+                .skills(Set.of(Skill.REGISTERED_NURSE))
+                .build();
+
+        Shift n1 = Shift.builder().id(1L).shiftDate(LocalDate.of(2026, 10, 20)).shiftType(ShiftType.NIGHT).department(general).assignedEmployee(nurse).build();
+        Shift n2 = Shift.builder().id(2L).shiftDate(LocalDate.of(2026, 10, 22)).shiftType(ShiftType.NIGHT).department(general).assignedEmployee(nurse).build();
+        Shift n3 = Shift.builder().id(3L).shiftDate(LocalDate.of(2026, 10, 24)).shiftType(ShiftType.NIGHT).department(general).assignedEmployee(nurse).build();
+
+        // 3 night shifts = 3^2 = 9 soft penalty points
+        constraintVerifier.verifyThat(RosterConstraintProvider::fairNightShiftDistribution)
+                .given(n1, n2, n3)
+                .penalizesBy(9);
+    }
+
+    @Test
+    @DisplayName("Should penalize assigning fatigued staff to high-stress wards")
+    void testProtectFatiguedStaffFromHighStress() {
+        Department icu = Department.builder().id(1L).name("ICU").type(DepartmentType.ICU).build(); // stressMultiplier = 3.0
+
+        Employee fatiguedNurse = Employee.builder()
+                .id(108L)
+                .employeeCode("RN-FATIGUE")
+                .fullName("Fatigued Staff")
+                .currentFatigueFactor(1.8) // High fatigue factor
+                .skills(Set.of(Skill.REGISTERED_NURSE, Skill.ICU_CERTIFIED))
+                .build();
+
+        Employee restedNurse = Employee.builder()
+                .id(109L)
+                .employeeCode("RN-RESTED")
+                .fullName("Rested Staff")
+                .currentFatigueFactor(1.0) // Normal rested factor
+                .skills(Set.of(Skill.REGISTERED_NURSE, Skill.ICU_CERTIFIED))
+                .build();
+
+        Shift intensiveShiftFatigued = Shift.builder()
+                .id(1L)
+                .shiftDate(LocalDate.of(2026, 10, 20))
+                .shiftType(ShiftType.MORNING)
+                .department(icu)
+                .assignedEmployee(fatiguedNurse)
+                .build();
+
+        Shift intensiveShiftRested = Shift.builder()
+                .id(2L)
+                .shiftDate(LocalDate.of(2026, 10, 20))
+                .shiftType(ShiftType.MORNING)
+                .department(icu)
+                .assignedEmployee(restedNurse)
+                .build();
+
+        // Fatigued nurse penalty: (1.8 - 1.0) * 10 * 3.0 = 24 points
+        constraintVerifier.verifyThat(RosterConstraintProvider::protectFatiguedStaffFromHighStress)
+                .given(intensiveShiftFatigued)
+                .penalizesBy(24);
+
+        // Rested nurse penalty: 0 points
+        constraintVerifier.verifyThat(RosterConstraintProvider::protectFatiguedStaffFromHighStress)
+                .given(intensiveShiftRested)
+                .penalizesBy(0);
+    }
 }

@@ -3,6 +3,7 @@ package com.shiftsync.solver.constraints;
 import ai.timefold.solver.core.api.score.buildin.hardmediumsoft.HardMediumSoftScore;
 import ai.timefold.solver.core.api.score.stream.*;
 import com.shiftsync.domain.entity.Shift;
+import com.shiftsync.domain.enums.ShiftType;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
@@ -14,6 +15,15 @@ import java.time.LocalDateTime;
  * 2. Minimum 12-hour rest gap between any two shifts (bans "clopening").
  * 3. At most one shift per calendar day.
  * 4. Maximum weekly working hours limit.
+ *
+ * Medium constraints guarantee operational coverage and burnout prevention:
+ * 1. Minimize unassigned shifts.
+ * 2. Cap consecutive high-stress (ICU/ER/Surgery) shifts to 2 in a row.
+ *
+ * Soft constraints optimize mental well-being and fairness:
+ * 1. Fair distribution of night shifts (quadratic penalty).
+ * 2. Shield fatigued staff from high-stress assignments.
+ * 3. Minimize cumulative cognitive strain across the hospital.
  */
 public class RosterConstraintProvider implements ConstraintProvider {
 
@@ -28,8 +38,14 @@ public class RosterConstraintProvider implements ConstraintProvider {
                 minimumRestGapBetweenShifts(factory),
                 maxWeeklyWorkingHours(factory),
 
-                // Medium Constraints (Operational Coverage)
-                minimizeUnassignedShifts(factory)
+                // Medium Constraints (Operational Coverage & Burnout Prevention)
+                minimizeUnassignedShifts(factory),
+                exceededConsecutiveHighStressShifts(factory),
+
+                // Soft Constraints (Mental Well-being & Workload Fairness)
+                fairNightShiftDistribution(factory),
+                protectFatiguedStaffFromHighStress(factory),
+                minimizeCognitiveStrain(factory)
         };
     }
 
@@ -101,6 +117,59 @@ public class RosterConstraintProvider implements ConstraintProvider {
                 .filter(shift -> shift.getAssignedEmployee() == null)
                 .penalize(HardMediumSoftScore.ONE_MEDIUM)
                 .asConstraint("Unassigned shift slot");
+    }
+
+    /**
+     * Medium Constraint: Staff should not be scheduled for 3 or more consecutive high-stress shifts
+     * (ICU, ER, Surgery) without a decompression break.
+     */
+    public Constraint exceededConsecutiveHighStressShifts(ConstraintFactory factory) {
+        return factory.forEach(Shift.class)
+                .filter(s1 -> s1.getAssignedEmployee() != null && s1.isHighStress())
+                .join(Shift.class,
+                        Joiners.equal(Shift::getAssignedEmployee),
+                        Joiners.filtering((s1, s2) -> s2.isHighStress() && s2.getShiftDate().equals(s1.getShiftDate().plusDays(1))))
+                .join(Shift.class,
+                        Joiners.equal((s1, s2) -> s1.getAssignedEmployee(), Shift::getAssignedEmployee),
+                        Joiners.filtering((s1, s2, s3) -> s3.isHighStress() && s3.getShiftDate().equals(s2.getShiftDate().plusDays(1))))
+                .penalize(HardMediumSoftScore.ONE_MEDIUM)
+                .asConstraint("Maximum 2 consecutive high-stress shifts");
+    }
+
+    /**
+     * Soft Constraint: Fair distribution of biologically disruptive night shifts across all eligible staff.
+     * Uses quadratic penalization (count^2) to mathematically minimize variance and reward equal spread.
+     */
+    public Constraint fairNightShiftDistribution(ConstraintFactory factory) {
+        return factory.forEach(Shift.class)
+                .filter(shift -> shift.getAssignedEmployee() != null && shift.getShiftType() == ShiftType.NIGHT)
+                .groupBy(Shift::getAssignedEmployee, ConstraintCollectors.count())
+                .penalize(HardMediumSoftScore.ONE_SOFT, (employee, count) -> count * count)
+                .asConstraint("Fair distribution of night shifts");
+    }
+
+    /**
+     * Soft Constraint: Protect staff who reported elevated fatigue in their daily check-in
+     * by penalizing their assignment to high-stress wards (ICU/ER/Surgery).
+     */
+    public Constraint protectFatiguedStaffFromHighStress(ConstraintFactory factory) {
+        return factory.forEach(Shift.class)
+                .filter(shift -> shift.getAssignedEmployee() != null && shift.isHighStress())
+                .filter(shift -> shift.getAssignedEmployee().getCurrentFatigueFactor() > 1.2)
+                .penalize(HardMediumSoftScore.ONE_SOFT,
+                        shift -> (int) Math.round((shift.getAssignedEmployee().getCurrentFatigueFactor() - 1.0) * 10 * shift.getDepartment().getStressMultiplier()))
+                .asConstraint("Protect fatigued staff from high-stress assignments");
+    }
+
+    /**
+     * Soft Constraint: Global cognitive load minimization across the entire hospital roster.
+     */
+    public Constraint minimizeCognitiveStrain(ConstraintFactory factory) {
+        return factory.forEach(Shift.class)
+                .filter(shift -> shift.getAssignedEmployee() != null)
+                .penalize(HardMediumSoftScore.ONE_SOFT,
+                        shift -> (int) Math.round(shift.calculateCognitiveLoadScore()))
+                .asConstraint("Minimize cognitive load strain");
     }
 
     // --- Static Utility Helpers for Rest Gap Calculation ---
