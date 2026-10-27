@@ -7,6 +7,7 @@ import lombok.NoArgsConstructor;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.List;
 
 @Data
 @Builder
@@ -22,8 +23,13 @@ public class SolverJobResponse {
     private boolean feasible; // true if hardScore >= 0
     private int totalShifts;
     private int assignedShifts;
+    private int timeoutSeconds;
     private LocalDate startDate;
     private LocalDate endDate;
     private LocalDateTime startedAt;
     private LocalDateTime completedAt;
+
+    private CapacityAnalysisDTO capacityAnalysis;
+    private List<ConstraintExplanationDTO> constraintBreakdown;
+    private String scoreSummary;
 }

@@ -1,6 +1,9 @@
 package com.shiftsync.solver.service;
 
+import ai.timefold.solver.core.api.score.ScoreExplanation;
 import ai.timefold.solver.core.api.score.buildin.hardmediumsoft.HardMediumSoftScore;
+import ai.timefold.solver.core.api.score.constraint.ConstraintMatchTotal;
+import ai.timefold.solver.core.api.solver.SolutionManager;
 import ai.timefold.solver.core.api.solver.SolverManager;
 import ai.timefold.solver.core.api.solver.SolverStatus;
 import com.shiftsync.domain.entity.Department;
@@ -10,6 +13,9 @@ import com.shiftsync.domain.enums.ShiftStatus;
 import com.shiftsync.repository.DepartmentRepository;
 import com.shiftsync.repository.EmployeeRepository;
 import com.shiftsync.repository.ShiftRepository;
+import com.shiftsync.solver.dto.CapacityAnalysisDTO;
+import com.shiftsync.solver.dto.ConstraintExplanationDTO;
+import com.shiftsync.solver.dto.SolveRosterRequest;
 import com.shiftsync.solver.dto.SolverJobResponse;
 import com.shiftsync.solver.model.RosterSchedule;
 import lombok.RequiredArgsConstructor;
@@ -19,13 +25,12 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Service managing asynchronous Timefold optimization runs for hospital rosters.
+ * Integrates pre-solve capacity analysis, time budgets, and detailed score explanations.
  */
 @Slf4j
 @Service
@@ -33,6 +38,8 @@ import java.util.concurrent.ConcurrentHashMap;
 public class RosterSolverService {
 
     private final SolverManager<RosterSchedule, String> solverManager;
+    private final SolutionManager<RosterSchedule, HardMediumSoftScore> solutionManager;
+    private final PreSolveCapacityValidator capacityValidator;
     private final ShiftRepository shiftRepository;
     private final EmployeeRepository employeeRepository;
     private final DepartmentRepository departmentRepository;
@@ -41,20 +48,60 @@ public class RosterSolverService {
     private final Map<String, RosterSchedule> latestSolutions = new ConcurrentHashMap<>();
 
     /**
-     * Triggers asynchronous solving of the roster for the given date range.
+     * Backward-compatible helper: Solves with default parameters.
      */
     public SolverJobResponse startSolving(LocalDate startDate, LocalDate endDate) {
-        String jobId = UUID.randomUUID().toString();
+        return startSolving(SolveRosterRequest.builder()
+                .startDate(startDate)
+                .endDate(endDate)
+                .timeoutSeconds(30)
+                .validateCapacityFirst(true)
+                .build());
+    }
 
-        List<Department> departments = departmentRepository.findAll();
+    /**
+     * Triggers asynchronous solving of the roster using the full request configuration.
+     */
+    public SolverJobResponse startSolving(SolveRosterRequest request) {
+        String jobId = UUID.randomUUID().toString();
+        LocalDate startDate = request.getStartDate();
+        LocalDate endDate = request.getEndDate();
+
+        List<Department> departments;
+        if (request.getDepartmentIds() != null && !request.getDepartmentIds().isEmpty()) {
+            departments = departmentRepository.findAllById(request.getDepartmentIds());
+        } else {
+            departments = departmentRepository.findAll();
+        }
+
         List<Employee> employees = employeeRepository.findByActiveTrue();
-        List<Shift> shifts = shiftRepository.findByShiftDateBetweenOrderByShiftDateAsc(startDate, endDate);
+        List<Shift> shifts;
+        if (request.getDepartmentIds() != null && !request.getDepartmentIds().isEmpty()) {
+            shifts = new ArrayList<>();
+            for (Department dept : departments) {
+                shifts.addAll(shiftRepository.findByDepartmentAndShiftDateBetween(dept, startDate, endDate));
+            }
+            shifts.sort(Comparator.comparing(Shift::getStartDateTime));
+        } else {
+            shifts = shiftRepository.findByShiftDateBetweenOrderByShiftDateAsc(startDate, endDate);
+        }
 
         if (shifts.isEmpty()) {
             throw new IllegalArgumentException("No shift slots found between " + startDate + " and " + endDate + ". Please generate slots first.");
         }
         if (employees.isEmpty()) {
             throw new IllegalArgumentException("No active healthcare staff found to assign shifts to.");
+        }
+
+        // Run Pre-solve Capacity Analysis if enabled
+        CapacityAnalysisDTO capacityAnalysis = null;
+        if (request.isValidateCapacityFirst()) {
+            capacityAnalysis = capacityValidator.validateCapacity(employees, shifts);
+            log.info("Pre-solve capacity check: feasible={}, demand={}h, capacity={}h, warnings={}",
+                    capacityAnalysis.isTheoreticallyFeasible(),
+                    capacityAnalysis.getTotalHoursDemand(),
+                    capacityAnalysis.getTotalStaffCapacityHours(),
+                    capacityAnalysis.getWarnings().size());
         }
 
         RosterSchedule problem = RosterSchedule.builder()
@@ -72,9 +119,11 @@ public class RosterSolverService {
                 .score("0hard/0medium/0soft")
                 .totalShifts(shifts.size())
                 .assignedShifts(0)
+                .timeoutSeconds(request.getTimeoutSeconds())
                 .startDate(startDate)
                 .endDate(endDate)
                 .startedAt(LocalDateTime.now())
+                .capacityAnalysis(capacityAnalysis)
                 .build();
 
         jobRegistry.put(jobId, initialStatus);
@@ -88,6 +137,27 @@ public class RosterSolverService {
                 .run();
 
         return initialStatus;
+    }
+
+    /**
+     * Dry-run capacity analysis without starting an optimization job.
+     */
+    @Transactional(readOnly = true)
+    public CapacityAnalysisDTO validateCapacityOnly(LocalDate startDate, LocalDate endDate, List<Long> departmentIds) {
+        List<Employee> staff = employeeRepository.findByActiveTrue();
+        List<Shift> shifts;
+
+        if (departmentIds != null && !departmentIds.isEmpty()) {
+            List<Department> depts = departmentRepository.findAllById(departmentIds);
+            shifts = new ArrayList<>();
+            for (Department dept : depts) {
+                shifts.addAll(shiftRepository.findByDepartmentAndShiftDateBetween(dept, startDate, endDate));
+            }
+        } else {
+            shifts = shiftRepository.findByShiftDateBetweenOrderByShiftDateAsc(startDate, endDate);
+        }
+
+        return capacityValidator.validateCapacity(staff, shifts);
     }
 
     private void updateJobProgress(String jobId, RosterSchedule solution) {
@@ -143,6 +213,34 @@ public class RosterSolverService {
                 current.setAssignedShifts((int) finalSolution.getShiftList().stream()
                         .filter(s -> s.getAssignedEmployee() != null)
                         .count());
+            }
+
+            // Extract detailed ScoreExplanation breakdown from Timefold
+            try {
+                ScoreExplanation<RosterSchedule, HardMediumSoftScore> explanation = solutionManager.explain(finalSolution);
+                current.setScoreSummary(explanation.getSummary());
+
+                List<ConstraintExplanationDTO> breakdown = new ArrayList<>();
+                for (ConstraintMatchTotal<HardMediumSoftScore> matchTotal : explanation.getConstraintMatchTotalMap().values()) {
+                    HardMediumSoftScore constraintScore = matchTotal.getScore();
+                    String level = "SOFT";
+                    if (constraintScore.hardScore() != 0) {
+                        level = "HARD";
+                    } else if (constraintScore.mediumScore() != 0) {
+                        level = "MEDIUM";
+                    }
+
+                    breakdown.add(ConstraintExplanationDTO.builder()
+                            .constraintName(matchTotal.getConstraintRef().constraintName())
+                            .scoreLevel(level)
+                            .scoreImpact(constraintScore.toString())
+                            .matchCount(matchTotal.getConstraintMatchCount())
+                            .description(matchTotal.getConstraintId())
+                            .build());
+                }
+                current.setConstraintBreakdown(breakdown);
+            } catch (Exception ex) {
+                log.warn("Could not generate constraint explanation for job {}: {}", jobId, ex.getMessage());
             }
         }
     }
