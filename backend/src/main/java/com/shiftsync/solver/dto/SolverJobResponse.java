@@ -23,7 +23,10 @@ public class SolverJobResponse {
     private boolean feasible; // true if hardScore >= 0
     private int totalShifts;
     private int assignedShifts;
+    private int unassignedShifts;
     private int timeoutSeconds;
+    private long solvingDurationMs;
+    private Double fairnessScore;
     private LocalDate startDate;
     private LocalDate endDate;
     private LocalDateTime startedAt;

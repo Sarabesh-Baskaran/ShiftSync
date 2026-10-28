@@ -43,6 +43,29 @@ public class SolverController {
         return ResponseEntity.ok(rosterSolverService.startSolving(fallbackRequest));
     }
 
+    @PostMapping("/solve-sync")
+    public ResponseEntity<SolverJobResponse> solveRosterSync(
+            @RequestBody(required = false) @Valid SolveRosterRequest request,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate) {
+
+        if (request != null) {
+            return ResponseEntity.ok(rosterSolverService.solveSync(request));
+        }
+
+        LocalDate start = (startDate != null) ? startDate : LocalDate.now();
+        LocalDate end = (endDate != null) ? endDate : start.plusDays(6);
+
+        SolveRosterRequest fallbackRequest = SolveRosterRequest.builder()
+                .startDate(start)
+                .endDate(end)
+                .timeoutSeconds(10)
+                .validateCapacityFirst(true)
+                .build();
+
+        return ResponseEntity.ok(rosterSolverService.solveSync(fallbackRequest));
+    }
+
     @GetMapping("/validate-capacity")
     public ResponseEntity<CapacityAnalysisDTO> validateCapacity(
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,

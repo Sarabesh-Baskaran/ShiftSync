@@ -17,20 +17,26 @@ import com.shiftsync.solver.dto.CapacityAnalysisDTO;
 import com.shiftsync.solver.dto.ConstraintExplanationDTO;
 import com.shiftsync.solver.dto.SolveRosterRequest;
 import com.shiftsync.solver.dto.SolverJobResponse;
+import com.shiftsync.dto.analytics.TeamScheduleAnalyticsDTO;
+import com.shiftsync.service.CognitiveLoadCalculator;
 import com.shiftsync.solver.model.RosterSchedule;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 /**
- * Service managing asynchronous Timefold optimization runs for hospital rosters.
- * Integrates pre-solve capacity analysis, time budgets, and detailed score explanations.
+ * Service managing asynchronous and synchronous Timefold optimization runs for hospital rosters.
+ * Integrates pre-solve capacity analysis, time budgets, post-solve fairness calculations,
+ * and detailed score explanations.
  */
 @Slf4j
 @Service
@@ -40,12 +46,14 @@ public class RosterSolverService {
     private final SolverManager<RosterSchedule, String> solverManager;
     private final SolutionManager<RosterSchedule, HardMediumSoftScore> solutionManager;
     private final PreSolveCapacityValidator capacityValidator;
+    private final CognitiveLoadCalculator cognitiveLoadCalculator;
     private final ShiftRepository shiftRepository;
     private final EmployeeRepository employeeRepository;
     private final DepartmentRepository departmentRepository;
 
     private final Map<String, SolverJobResponse> jobRegistry = new ConcurrentHashMap<>();
     private final Map<String, RosterSchedule> latestSolutions = new ConcurrentHashMap<>();
+    private final Map<String, CompletableFuture<SolverJobResponse>> syncFutures = new ConcurrentHashMap<>();
 
     /**
      * Backward-compatible helper: Solves with default parameters.
@@ -64,6 +72,10 @@ public class RosterSolverService {
      */
     public SolverJobResponse startSolving(SolveRosterRequest request) {
         String jobId = UUID.randomUUID().toString();
+        return startSolvingWithJobId(jobId, request);
+    }
+
+    public SolverJobResponse startSolvingWithJobId(String jobId, SolveRosterRequest request) {
         LocalDate startDate = request.getStartDate();
         LocalDate endDate = request.getEndDate();
 
@@ -135,6 +147,20 @@ public class RosterSolverService {
                 .withFinalBestSolutionConsumer(finalSolution -> onSolvingFinished(jobId, finalSolution))
                 .withExceptionHandler((id, exception) -> onSolvingError(jobId, exception))
                 .run();
+
+        // Enforce request timeout dynamically
+        if (request.getTimeoutSeconds() > 0) {
+            CompletableFuture.delayedExecutor(request.getTimeoutSeconds(), TimeUnit.SECONDS)
+                    .execute(() -> {
+                        try {
+                            if (solverManager.getSolverStatus(jobId) == SolverStatus.SOLVING_ACTIVE) {
+                                log.info("Terminating solver job {} after reaching timeout of {}s", jobId, request.getTimeoutSeconds());
+                                solverManager.terminateEarly(jobId);
+                            }
+                        } catch (Exception ignored) {
+                        }
+                    });
+        }
 
         return initialStatus;
     }
@@ -210,9 +236,24 @@ public class RosterSolverService {
                 current.setFeasible(score.isFeasible());
             }
             if (finalSolution.getShiftList() != null) {
-                current.setAssignedShifts((int) finalSolution.getShiftList().stream()
+                int assigned = (int) finalSolution.getShiftList().stream()
                         .filter(s -> s.getAssignedEmployee() != null)
-                        .count());
+                        .count();
+                current.setAssignedShifts(assigned);
+                current.setUnassignedShifts(current.getTotalShifts() - assigned);
+            }
+
+            if (current.getStartedAt() != null && current.getCompletedAt() != null) {
+                current.setSolvingDurationMs(Duration.between(current.getStartedAt(), current.getCompletedAt()).toMillis());
+            }
+
+            // Post-solve Fairness Analytics Calculation
+            try {
+                TeamScheduleAnalyticsDTO analytics = cognitiveLoadCalculator.calculateTeamAnalytics(
+                        finalSolution.getStartDate(), finalSolution.getEndDate(), null);
+                current.setFairnessScore(analytics.getFairnessScore());
+            } catch (Exception ex) {
+                log.warn("Could not calculate team fairness score for job {}: {}", jobId, ex.getMessage());
             }
 
             // Extract detailed ScoreExplanation breakdown from Timefold
@@ -242,6 +283,12 @@ public class RosterSolverService {
             } catch (Exception ex) {
                 log.warn("Could not generate constraint explanation for job {}: {}", jobId, ex.getMessage());
             }
+
+            // Complete synchronous waiting future if registered
+            CompletableFuture<SolverJobResponse> syncFuture = syncFutures.remove(jobId);
+            if (syncFuture != null) {
+                syncFuture.complete(current);
+            }
         }
     }
 
@@ -251,6 +298,31 @@ public class RosterSolverService {
         if (current != null) {
             current.setStatus("FAILED: " + exception.getMessage());
             current.setCompletedAt(LocalDateTime.now());
+            CompletableFuture<SolverJobResponse> syncFuture = syncFutures.remove(jobId);
+            if (syncFuture != null) {
+                syncFuture.complete(current);
+            }
+        }
+    }
+
+    /**
+     * Executes synchronous roster optimization, blocking until the solver converges or reaches timeout.
+     */
+    public SolverJobResponse solveSync(SolveRosterRequest request) {
+        String jobId = UUID.randomUUID().toString();
+        CompletableFuture<SolverJobResponse> future = new CompletableFuture<>();
+        syncFutures.put(jobId, future);
+
+        startSolvingWithJobId(jobId, request);
+
+        try {
+            return future.get(request.getTimeoutSeconds() + 10L, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            log.error("Synchronous solver execution timed out or was interrupted for job {}", jobId, e);
+            terminateEarly(jobId);
+            return getJobStatus(jobId);
+        } finally {
+            syncFutures.remove(jobId);
         }
     }
 

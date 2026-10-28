@@ -41,6 +41,10 @@ class RosterSolverServiceTest {
     @Test
     @DisplayName("Should initiate solver job and return active job status")
     void testStartSolvingAndGetStatus() {
+        shiftRepository.deleteAll();
+        departmentRepository.deleteAll();
+        employeeRepository.deleteAll();
+
         Department ward = departmentRepository.save(Department.builder()
                 .name("Oncology Unit")
                 .type(DepartmentType.GENERAL_WARD)
