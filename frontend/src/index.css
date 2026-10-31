@@ -1,0 +1,29 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --color-load-low: #10b981;
+    --color-load-moderate: #f59e0b;
+    --color-load-high: #f97316;
+    --color-load-critical: #ef4444;
+  }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background-color: #0b0f19;
+    color: #f1f5f9;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    min-height: 100dvh;
+    scrollbar-gutter: stable;
+  }
+}
+
+/* Custom Healthcare Glows & Badges */
+.pulse-glow {
+  box-shadow: 0 0 15px rgba(20, 184, 166, 0.35);
+}
+
+.critical-glow {
+  box-shadow: 0 0 15px rgba(239, 68, 68, 0.4);
+}
